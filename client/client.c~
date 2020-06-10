@@ -1,0 +1,181 @@
+#include "client.h"
+#include <stdio.h> 
+#include <stdlib.h>
+#include <sys/ipc.h> 
+#include <sys/msg.h> 
+#include <string.h>
+#include <sys/types.h>
+#include <sys/wait.h>
+#include <unistd.h>
+#include <dirent.h>
+#include <sys/stat.h>
+
+#define BUFFER 200
+
+
+int totalClient;
+FILE **clientInputFile;
+char absolutePath[BUFFER];
+key_t key; 
+int msgid;
+int fileCount = 0;
+
+
+struct message_buffer { 
+	long type; 
+	char text[BUFFER]; 
+};
+
+int isDirectoryEmpty(char *dirname) //Check if directory is empty, returns 1 if it is empty.
+{
+  int n = 0;
+  struct dirent *d;
+  DIR *dir = opendir(dirname);
+  if (dir == NULL) //Not a directory or doesn't exist
+    return 1;
+  while ((d = readdir(dir)) != NULL) {
+  
+    if(++n > 2)
+      break;
+  }
+  closedir(dir);
+  if (n <= 2) //Directory Empty
+    return 1;
+  else
+    return 0;
+}
+
+
+void iterateDirectory(char *pwd, int c)
+{
+	char path[1000];
+	DIR *d=opendir(pwd);
+	struct dirent *ds;
+	while((ds=readdir(d))!=NULL)
+	{
+		if(strcmp(ds->d_name,".")!=0 && strcmp(ds->d_name,"..")!=0)  
+		{
+			
+			if(ds->d_type==4) // it is directory
+			{
+				strcpy(path,pwd);
+				strcat(path,"/");
+				strcat(path,ds->d_name);
+				iterateDirectory(path, c);
+			}
+			else
+			{
+				fprintf(clientInputFile[c],"%s/%s\n",pwd,ds->d_name);
+				c = (c+1) % totalClient;
+			}
+		}
+	}
+}
+
+void createMessageQueue()
+{
+	key = 1234; //generating unique key
+	msgid = msgget(key, 0666 | IPC_CREAT); 
+}
+
+void communicateToServer(int c)
+{
+
+	int conversationOver = 0;
+	FILE *file;
+	char fileName[BUFFER];
+	sprintf(fileName, "./ClientInput/Client%d.txt", c);
+	file = fopen(fileName, "r");	
+	char buffer[BUFFER];
+	int count;
+	struct message_buffer global_data;
+	while(!conversationOver)
+	{
+		struct message_buffer message, ack;		
+		message.type = c+1;
+				
+		count = fscanf(file, "%s", message.text);
+		if(count != -1)
+		{
+			fileCount++;
+			printf("Sending %s from client process %d\n", message.text, c);
+			msgsnd(msgid, &message, sizeof(message), 0);
+			msgrcv(msgid, &ack, sizeof(ack), totalClient+c+1, 0);
+			printf("Client process %d received %s from server for %s\n", c, ack.text, message.text);
+		}
+		else
+		{
+			strcpy(message.text, "END");
+			printf("Sending %s from client process %d\n", message.text, c);
+			msgsnd(msgid, &message, sizeof(message), 0);
+			conversationOver = 1;
+		}
+	}
+	msgrcv(msgid, &global_data, sizeof(global_data), totalClient * 2 + 1, 0);
+	printf("Client process %d received |||%s||| from server \n", c, global_data.text);
+	fclose(file);
+	mkdir("Output", 0777);
+	sprintf(fileName, "./Output/Client%d_out.txt", c);
+	file = fopen(fileName, "w");
+	fprintf(file, "%s", global_data.text);
+	fclose(file);
+	return;
+}
+
+int main(int argc, char* argv[]) 
+{ 
+
+	printf("Client starts...\n");
+
+	if(isDirectoryEmpty(argv[1]) == 1) {
+		printf("Empty Directory");
+		return 0; // directory is empty
+	}
+	realpath(argv[1], absolutePath);
+	totalClient = atoi(argv[2]);
+	clientInputFile = malloc(sizeof(FILE*) * totalClient);
+	mkdir("ClientInput", 0777);
+//	int i;
+	for(int i=0;i<totalClient;i++)
+	{
+		char fileName[BUFFER];
+		sprintf(fileName, "./ClientInput/Client%d.txt", i);
+		clientInputFile[i] = fopen(fileName, "w");
+		if(clientInputFile[i] == NULL)
+		{
+			printf("Cannot open Client%d.txt", i);
+			exit(-1); 
+		}
+			
+	}
+	printf("Directory %s traversal and file partitioning...\n", argv[1]);
+
+	iterateDirectory(absolutePath, 0);
+	for(int i=0;i<totalClient;i++) 
+		fclose(clientInputFile[i]);
+		
+	
+	createMessageQueue();
+	
+    for(int i=0;i<totalClient;i++)  
+    { 
+        if(fork() == 0) 
+        { 
+            communicateToServer(i);
+            exit(0); 
+        } 
+    } 
+    for(int i=0;i<totalClient;i++) 
+    	wait(NULL); 	
+	
+	
+	
+	
+	msgctl(msgid, IPC_RMID, NULL);
+		
+
+	printf("\nClient ends...\n");
+	return 0; 
+} 
+
+
